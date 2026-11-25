@@ -1,0 +1,55 @@
+name: fetch-blocks
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_block:
+        description: "First block number"
+        required: true
+        type: number
+      last_block:
+        description: "Last block number (chunks of at most 100)"
+        required: true
+        type: number
+      mode:
+        description: "ledger = also build native-value ledger; raw = blocks/txs/receipts only"
+        required: true
+        type: choice
+        options: [ledger, raw]
+        default: raw
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch chunks and publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIRST: ${{ inputs.first_block }}
+          LAST: ${{ inputs.last_block }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import os,sys; f=int(float(os.environ["FIRST"])); l=int(float(os.environ["LAST"])); sys.exit(0 if 0 <= f <= l and l-f+1 <= 100000 else 1)'
+          TAG="data-${FIRST}-${LAST}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "BNB blocks ${FIRST}-${LAST}" \
+              --notes "BNB Smart Chain (chainId 56) public block data. SQLite per 100-block chunk: blocks, txs, receipts. Each asset has a .manifest.json. No private keys."
+          f="$FIRST"
+          while [ "$f" -le "$LAST" ]; do
+            l=$((f + 99))
+            if [ "$l" -gt "$LAST" ]; then l="$LAST"; fi
+            echo "=== chunk ${f}-${l} ==="
+            python3 scripts/fetch_chunk.py --first "$f" --last "$l" \
+              --out "bnb_${f}_${l}.db" --mode "$MODE" --workers 2
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              "bnb_${f}_${l}.db.gz" "bnb_${f}_${l}.db.manifest.json"
+            rm -f "bnb_${f}_${l}.db" "bnb_${f}_${l}.db.gz" "bnb_${f}_${l}.db.manifest.json"
+            f=$((l + 1))
+          done
